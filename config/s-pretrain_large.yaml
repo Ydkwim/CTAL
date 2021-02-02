@@ -1,0 +1,12 @@
+semantic:
+  num_attention_heads: 12
+  num_hidden_layers: 12
+
+dataloader:
+  batch_size: 64
+
+runner:
+  save_step: 5000
+  log_step: 250
+  max_keep: 2
+  num_epochs: 20

@@ -191,7 +191,9 @@ class Runner():
                     elif self.apex:
                         self.optimizer.backward(loss)
                     elif self.args.multi_gpu:
-                        loss = loss.sum()
+                        acoustic_loss = acoustic_loss.mean()
+                        semantic_loss = semantic_loss.mean()
+                        loss = loss.mean()
                         loss.backward()
                     else:
                         loss.backward()

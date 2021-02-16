@@ -1,0 +1,24 @@
+upstream:
+  ckpt_path: '/home/work/Projects/MMPretrain/code/result/result_transformer/m2pretrain_tiny/states-1000000.ckpt'
+  freeze: False
+  acoustic:
+    downsample_rate: 1                                    # stacked consecutive features vectors to reduce the length of input sequences by this factor.
+    hidden_size: 768                                      # Size of the encoder layers and the pooler layer.
+  semantic:
+    tokenizer_path: '/home/work/Projects/MMPretrain/tokenizer/libri-roberta_train-960'
+
+downstream:
+  label_num: 4
+  orthogonal_fusion: True
+
+optimizer: 
+  type: 'adam'                                          # modes: ['adam', 'adamW', 'lamb']  
+  learning_rate: 0.0001                                 # Learning rate for opt. "4e-4" for 'data/libri_mel160_subword5000', "2e-4" for 'data/libri_fmllr_cmvn'
+  loss_scale: 0                                         # Loss scale to improve fp16 numeric stability. Only used when apex is set to True. 0: dynamic loss scaling. positive power of 2: static loss scaling.
+  warmup_proportion: 0.7                                # Proportion of training to perform linear rate warmup.
+  gradient_accumulation_steps: 1                        # Number of updates steps to accumulate before performing a backward/update pass
+  gradient_clipping: 1.0                                # Maximum gradient norm
+
+dataloader:
+  n_jobs: 2
+  batch_size: 2

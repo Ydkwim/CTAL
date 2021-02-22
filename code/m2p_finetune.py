@@ -19,6 +19,7 @@ from torch.nn.utils.rnn import pad_sequence
 from transformers import RobertaTokenizer
 from transformers import AdamW
 
+from calculate_eer import get_eer
 from m2p_mask import process_test_MAM_data
 from m2p_transfer import RobertaM2Downstream
 
@@ -49,6 +50,10 @@ def downstream_metrics(pred_label, true_label, task='emotion'):
         acc_2class = accuracy_score(true_2class,pred_2class)
         f1_2class = f1_score(true_2class, pred_2class, average='weighted')
         key_metric, report_metric = -1.0 * mae, {'mae':mae,'corr':corr,'acc_2class':acc_2class,'f1_2class':f1_2class}
+
+    elif task == 'speaker_verification':
+        eer = get_eer(pred_label, true_label, debug=False)
+        key_metric, report_metric = eer, {'EER': eer}
 
     else:
         acc = np.mean(pred_label == true_label)
@@ -189,14 +194,22 @@ def run(args, config, train_data, valid_data, test_data=None):
             s_attention_mask = semantic_inputs[1].cuda()
 
             true_y.extend(list(label_inputs.numpy()))
-            
-            logits, _ = model(
-                s_inputs=s_inputs,
-                s_attention_mask=s_attention_mask,
-                a_inputs=a_inputs,
-                a_attention_mask=a_attention_mask,
-                labels=None
-            )
+
+            if args.task_name == "speaker_verification":
+                logits = model.get_speaker_embeddings(
+                    s_inputs=s_inputs,
+                    s_attention_mask=s_attention_mask,
+                    a_inputs=a_inputs,
+                    a_attention_mask=a_attention_mask
+                )
+            else:
+                logits, _ = model(
+                    s_inputs=s_inputs,
+                    s_attention_mask=s_attention_mask,
+                    a_inputs=a_inputs,
+                    a_attention_mask=a_attention_mask,
+                    labels=None
+                )
 
             # prediction = torch.argmax(logits, axis=1)
             # label_outputs = prediction.cpu().detach().numpy().astype(float)
@@ -205,8 +218,11 @@ def run(args, config, train_data, valid_data, test_data=None):
                 prediction = logits.view(-1)
                 label_outputs = prediction.cpu().detach().numpy().astype(float)
             else:
-                prediction = torch.argmax(logits, axis=1)
-                label_outputs = prediction.cpu().detach().numpy().astype(int)
+                if args.task_name == "speaker_verification":
+                    label_outputs = prediction.cpu().detach().numpy().astype(int)
+                else:
+                    prediction = torch.argmax(logits, axis=1)
+                    label_outputs = prediction.cpu().detach().numpy().astype(int)
 
             pred_y.extend(list(label_outputs))
 
@@ -234,21 +250,32 @@ def run(args, config, train_data, valid_data, test_data=None):
 
                 true_y.extend(list(label_inputs.numpy()))
 
-                logits, _, = model(
-                    s_inputs=s_inputs,
-                    s_attention_mask=s_attention_mask,
-                    a_inputs=a_inputs,
-                    a_attention_mask=a_attention_mask,
-                    labels=None
-                )
+                if args.task_name == "speaker_verification":
+                    logits = model.get_speaker_embeddings(
+                        s_inputs=s_inputs,
+                        s_attention_mask=s_attention_mask,
+                        a_inputs=a_inputs,
+                        a_attention_mask=a_attention_mask
+                    )
+                else:
+                    logits, _, = model(
+                        s_inputs=s_inputs,
+                        s_attention_mask=s_attention_mask,
+                        a_inputs=a_inputs,
+                        a_attention_mask=a_attention_mask,
+                        labels=None
+                    )
                 
                 if model.label_num == 1:
                     prediction = logits.view(-1)
                     label_outputs = prediction.cpu().detach().numpy().astype(float)
                 else:
-                    prediction = torch.argmax(logits, axis=1)
-                    label_outputs = prediction.cpu().detach().numpy().astype(int)
-                
+                    if args.task_name == "speaker_verification":
+                        label_outputs = prediction.cpu().detach().numpy().astype(int)
+                    else:
+                        prediction = torch.argmax(logits, axis=1)
+                        label_outputs = prediction.cpu().detach().numpy().astype(int)
+
                 pred_y.extend(list(label_outputs))
 
             _, save_metric = downstream_metrics(pred_y, true_y, args.task_name)

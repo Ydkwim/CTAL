@@ -243,3 +243,84 @@ class RobertaM2Downstream(RobertaM2Upstream):
             loss = None
 
         return logits, loss
+
+    def get_speaker_embeddings(self,
+                s_inputs=None,
+                s_attention_mask=None,
+                s_token_type_ids=None,
+                s_position_ids=None,
+                s_head_mask=None,
+                a_inputs=None,
+                a_attention_mask=None,
+                a_token_type_ids=None,
+                a_position_ids=None,
+                a_head_mask=None,
+                output_attentions=False,
+                output_hidden_states=False,
+                return_dict=None):
+
+        if self.freeze:
+            with torch.no_grad():
+                semantic_encode, acoustic_encode = self._forward(
+                    s_inputs,
+                    s_attention_mask,
+                    s_token_type_ids,
+                    s_position_ids,
+                    s_head_mask,
+                    a_inputs,
+                    a_attention_mask,
+                    a_token_type_ids,
+                    a_position_ids,
+                    a_head_mask,
+                    output_attentions,
+                    output_hidden_states,
+                    return_dict)
+        else:
+            semantic_encode, acoustic_encode = self._forward(
+                s_inputs,
+                s_attention_mask,
+                s_token_type_ids,
+                s_position_ids,
+                s_head_mask,
+                a_inputs,
+                a_attention_mask,
+                a_token_type_ids,
+                a_position_ids,
+                a_head_mask,
+                output_attentions,
+                output_hidden_states,
+                return_dict)
+
+        semantic_encode = self.semantic_linear(semantic_encode)
+        semantic_encode = torch.tanh(semantic_encode)
+
+        semantic_pool = semantic_encode[:, 0, :]
+
+        semantic_encode = semantic_encode * s_attention_mask[:, :, None] - 10000.0 * (
+                    1.0 - s_attention_mask[:, :, None])
+        semantic_max = torch.max(semantic_encode[:, 1:, :], dim=1)[0]
+
+        acoustic_encode = self.acoustic_linear(acoustic_encode)
+        acoustic_encode = torch.tanh(acoustic_encode)
+
+        acoustic_pool = self.acoustic_attention(acoustic_encode)
+        acoustic_pool = acoustic_pool * a_attention_mask[:, :, None] - 10000.0 * (1.0 - a_attention_mask[:, :, None])
+        acoustic_pool = F.softmax(acoustic_pool, dim=1)
+        acoustic_pool = torch.matmul(acoustic_pool.permute(0, 2, 1), acoustic_encode).squeeze(1)
+
+        acoustic_encode = acoustic_encode * a_attention_mask[:, :, None] - 10000.0 * (
+                    1.0 - a_attention_mask[:, :, None])
+        acoustic_max = torch.max(acoustic_encode, dim=1)[0]
+
+        if self.orthogonal_fusion:
+            att_feats = semantic_pool + acoustic_pool
+            max_feats = semantic_max + acoustic_max
+            fuse_encode = torch.cat([att_feats, max_feats], dim=-1)
+        else:
+            fuse_encode = torch.cat([semantic_pool, acoustic_pool], dim=-1)
+
+        fuse_encode = self.fuse_linear(fuse_encode)
+        fuse_encode_act = torch.tanh(fuse_encode)
+
+        return fuse_encode_act
+

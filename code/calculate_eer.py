@@ -33,6 +33,10 @@ def get_utterance_centroids(embeddings):
     return centroids
 
 def get_cossim(embeddings, centroids):
+    """
+    embeddings 
+    centroids: [speaker_ct, embedding_size]
+    """
     # number of utterances per speaker
     num_utterances = embeddings.shape[1]
     utterance_centroids = get_utterance_centroids(embeddings)
@@ -42,11 +46,12 @@ def get_cossim(embeddings, centroids):
     utterance_centroids_flat = utterance_centroids.view(
         utterance_centroids.shape[0] * utterance_centroids.shape[1],
         -1
-    )
+    ) # [speaker_ct*utterance_per_speaker_ct, embedding_size]
     embeddings_flat = embeddings.reshape(
         embeddings.shape[0] * num_utterances,
         -1
-    )
+    ) # [speaker_ct*utterance_per_speaker_ct, embedding_size]
+
     # the cosine distance between utterance and the associated centroids
     # for that utterance
     # this is each speaker's utterances against his own centroid, but each
@@ -59,18 +64,18 @@ def get_cossim(embeddings, centroids):
     # operation fast, we vectorize by using matrices L (embeddings) and
     # R (centroids) where L has each utterance repeated sequentially for all
     # comparisons and R has the entire centroids frame repeated for each utterance
-    centroids_expand = centroids.repeat((num_utterances * embeddings.shape[0], 1))
-    embeddings_expand = embeddings_flat.unsqueeze(1).repeat(1, embeddings.shape[0], 1)
+    centroids_expand = centroids.repeat((num_utterances * embeddings.shape[0], 1)) # [centroid_ct*speaker_ct*utterance_per_speaker_ct, embedding_size]
+    embeddings_expand = embeddings_flat.unsqueeze(1).repeat(1, embeddings.shape[0], 1) # [speaker_ct*utterance_per_speaker_ct, speaker_ct, embedding_size]
     embeddings_expand = embeddings_expand.view(
         embeddings_expand.shape[0] * embeddings_expand.shape[1],
         embeddings_expand.shape[-1]
-    )
+    ) # [speaker_ct*utterance_per_speaker_ct*speaker_ct, embedding_size]
     cos_diff = F.cosine_similarity(embeddings_expand, centroids_expand)
     cos_diff = cos_diff.view(
         embeddings.size(0),
         num_utterances,
         centroids.size(0)
-    )
+    ) # [spekaer_ct, utterance_per_speaker_ct, centroid_ct]
     # assign the cosine distance for same speakers to the proper idx
     same_idx = list(range(embeddings.size(0)))
     cos_diff[same_idx, :, same_idx] = cos_same.view(embeddings.shape[0], num_utterances)

@@ -76,32 +76,31 @@ def downstream_metrics(pred_label, true_label, task='emotion'):
 
                 all_embeds.append(utt_embeds)
 
-            all_embeds = torch.from_numpy(np.stack(all_embeds, axis=0))
+            all_embeds = np.stack(all_embeds, axis=0)
 
-            enroll_embeds, verify_embeds = torch.split(all_embeds, int(M / 2), dim=1) # [N, M/2, dim]
-            enroll_centroids = enroll_embeds.mean(dim=1) # [N, dim]
-            enroll_standard = torch.sum(torch.sqrt(enroll_centroids**2), dim=1) # [N,]
+            enroll_embeds, verify_embeds = all_embeds[:,:int(M/2),:], all_embeds[:,int(M/2):,:]
+            enroll_centroids = enroll_embeds.mean(axis=1) # [N, dim]
+            enroll_standard = np.sum(np.sqrt(enroll_centroids**2), axis=1) # [N,]
             
             # Here we calculate the simularity for each centroid and the sample
-            verify_embeds = verify_embeds.reshape(-1,verify_embeds.size(2)) # [N*M/2,dim]
-            verify_standard = torch.sum(torch.sqrt(verify_embeds**2), dim=1) # [N*M/2,]
+            verify_embeds = verify_embeds.reshape(-1,verify_embeds.shape[2]) # [N*M/2,dim]
+            verify_standard = np.sum(np.sqrt(verify_embeds**2), axis=1) # [N*M/2,]
 
-            matmul_standard = torch.matmul(verify_standard[:,None],enroll_standard[None,:])
-            eps = 1e-8
-            matmul_standard = torch.where(matmul_standard>eps, matmul_standard, eps*torch.ones_like(matmul_standard))
+            matmul_standard = np.matmul(verify_standard[:,None],enroll_standard[None,:])
+            matmul_standard = np.where(matmul_standard>1e-8, matmul_standard, 1e-8)
             
-            verify_scores = torch.matmul(verify_embeds,enroll_centroids.permute(1,0)) / matmul_standard
-            verify_scores = verify_scores.view(N,-1,N)
+            verify_scores = np.matmul(verify_embeds,enroll_centroids.T) / matmul_standard
+            verify_scores = verify_scores.reshape(N,-1,N)
             
             # calculate the EER
-            verify_scores = verify_scores + 1e-6 # we add the number to make it compatible with the later threshold process
-            mark_diff, EER = 1, 0
+            verify_scores = verify_scores + 1e-6 # we add the eps number to make it compatible with the later threshold process
+            mark_diff, EER = np.inf, 0
             for thres in [0.01 * i for i in range(101)]:
                 verify_results = verify_scores > thres
-                FAR = (sum([verify_results[i].float().sum() - verify_results[i, :, i].float().sum() for i in
+                FAR = (sum([verify_results[i].sum() - verify_results[i,:,i].sum() for i in
                             range(int(N))])
                        / (N - 1.0) / (float(M / 2)) / N)
-                FRR = (sum([M / 2 - verify_results[i, :, i].float().sum() for i in range(int(N))])
+                FRR = (sum([M / 2 - verify_results[i,:,i].sum() for i in range(int(N))])
                        / (float(M / 2)) / N)
                 # Save threshold when FAR = FRR (=EER)
                 if abs(FAR-FRR) < mark_diff:
@@ -110,7 +109,7 @@ def downstream_metrics(pred_label, true_label, task='emotion'):
             
             eer.append(EER)
         eer = np.mean(eer)
-        key_metric, report_metric = eer, {'eer':eer}
+        key_metric, report_metric = -1.0 * eer, {'eer':eer}
 
     return key_metric, report_metric
 
@@ -244,34 +243,35 @@ def run(args, config, train_data, valid_data, test_data=None):
 
         model.eval()
         pred_y, true_y = [], []
-        for acoustic_inputs, semantic_inputs, label_inputs, _ in valid_loader:
-            a_inputs = acoustic_inputs[0].cuda()
-            a_attention_mask = acoustic_inputs[1].cuda()
-            s_inputs = semantic_inputs[0].cuda()
-            s_attention_mask = semantic_inputs[1].cuda()
+        with torch.no_grad():
+            for acoustic_inputs, semantic_inputs, label_inputs, _ in valid_loader:
+                a_inputs = acoustic_inputs[0].cuda()
+                a_attention_mask = acoustic_inputs[1].cuda()
+                s_inputs = semantic_inputs[0].cuda()
+                s_attention_mask = semantic_inputs[1].cuda()
 
-            true_y.extend(list(label_inputs.numpy()))
+                true_y.extend(list(label_inputs.numpy()))
 
-            hiddens, logits, _ = model(
-                s_inputs=s_inputs,
-                s_attention_mask=s_attention_mask,
-                a_inputs=a_inputs,
-                a_attention_mask=a_attention_mask,
-                labels=None
-            )
+                hiddens, logits, _ = model(
+                    s_inputs=s_inputs,
+                    s_attention_mask=s_attention_mask,
+                    a_inputs=a_inputs,
+                    a_attention_mask=a_attention_mask,
+                    labels=None
+                )
 
-            if model.label_num == 1:
-                prediction = logits.view(-1)
-                label_outputs = prediction.cpu().detach().numpy().astype(float)
-            else:
-                if args.task_name == "verification":
-                    # for speaker verification we take the hidden before the classifier as the output
-                    label_outputs = hiddens.cpu().detach().numpy().astype(float)
+                if model.label_num == 1:
+                    prediction = logits.view(-1)
+                    label_outputs = prediction.cpu().detach().numpy().astype(float)
                 else:
-                    prediction = torch.argmax(logits, axis=1)
-                    label_outputs = prediction.cpu().detach().numpy().astype(int)
+                    if args.task_name == "verification":
+                        # for speaker verification we take the hidden before the classifier as the output
+                        label_outputs = hiddens.cpu().detach().numpy().astype(float)
+                    else:
+                        prediction = torch.argmax(logits, axis=1)
+                        label_outputs = prediction.cpu().detach().numpy().astype(int)
 
-            pred_y.extend(list(label_outputs))
+                pred_y.extend(list(label_outputs))
 
         # think about the metric calculation
         key_metric, report_metric = downstream_metrics(pred_y, true_y, args.task_name)
@@ -289,33 +289,34 @@ def run(args, config, train_data, valid_data, test_data=None):
             best_metric, best_epoch = key_metric, epoch
             print('Better Metric found on dev, calculate performance on Test')
             pred_y, true_y = [], []
-            for acoustic_inputs, semantic_inputs, label_inputs, _ in test_loader:
-                a_inputs = acoustic_inputs[0].cuda()
-                a_attention_mask = acoustic_inputs[1].cuda()
-                s_inputs = semantic_inputs[0].cuda()
-                s_attention_mask = semantic_inputs[1].cuda()
+            with torch.no_grad():
+                for acoustic_inputs, semantic_inputs, label_inputs, _ in test_loader:
+                    a_inputs = acoustic_inputs[0].cuda()
+                    a_attention_mask = acoustic_inputs[1].cuda()
+                    s_inputs = semantic_inputs[0].cuda()
+                    s_attention_mask = semantic_inputs[1].cuda()
 
-                true_y.extend(list(label_inputs.numpy()))
-                
-                hiddens, logits, _, = model(
-                    s_inputs=s_inputs,
-                    s_attention_mask=s_attention_mask,
-                    a_inputs=a_inputs,
-                    a_attention_mask=a_attention_mask,
-                    labels=None
-                )
-                
-                if model.label_num == 1:
-                    prediction = logits.view(-1)
-                    label_outputs = prediction.cpu().detach().numpy().astype(float)
-                else:
-                    if args.task_name == "verification":
-                        label_outputs = hiddens.cpu().detach().numpy().astype(float)
+                    true_y.extend(list(label_inputs.numpy()))
+                    
+                    hiddens, logits, _, = model(
+                        s_inputs=s_inputs,
+                        s_attention_mask=s_attention_mask,
+                        a_inputs=a_inputs,
+                        a_attention_mask=a_attention_mask,
+                        labels=None
+                    )
+                    
+                    if model.label_num == 1:
+                        prediction = logits.view(-1)
+                        label_outputs = prediction.cpu().detach().numpy().astype(float)
                     else:
-                        prediction = torch.argmax(logits, axis=1)
-                        label_outputs = prediction.cpu().detach().numpy().astype(int)
+                        if args.task_name == "verification":
+                            label_outputs = hiddens.cpu().detach().numpy().astype(float)
+                        else:
+                            prediction = torch.argmax(logits, axis=1)
+                            label_outputs = prediction.cpu().detach().numpy().astype(int)
 
-                pred_y.extend(list(label_outputs))
+                    pred_y.extend(list(label_outputs))
 
             _, save_metric = downstream_metrics(pred_y, true_y, args.task_name)
             print("Test Metric: {}".format(
@@ -381,8 +382,6 @@ if __name__ == '__main__':
 
         train_data = pickle.load(open('/dataset/libri_mel160/V2_0/libri_mel160/verify_train.pkl','rb'))
         train_data = [(os.path.join(data_root,x[0]),os.path.join(data_root,x[1]),x[2]) for x in train_data]
-        
-        train_data = train_data[:1024]
 
         valid_data = pickle.load(open('/dataset/libri_mel160/V2_0/libri_mel160/verify_dev.pkl','rb'))
         valid_data = [(os.path.join(data_root,x[0]),os.path.join(data_root,x[1]),x[2]) for x in valid_data]

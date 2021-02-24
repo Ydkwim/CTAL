@@ -1,8 +1,8 @@
 import os
 import re
-import math
 import time
 import yaml
+import random
 import pickle
 import argparse
 import numpy as np
@@ -14,12 +14,12 @@ from sklearn.metrics import accuracy_score, f1_score
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 
 from transformers import RobertaTokenizer
 from transformers import AdamW
 
-from calculate_eer import get_eer
 from m2p_mask import process_test_MAM_data
 from m2p_transfer import RobertaM2Downstream
 
@@ -31,7 +31,7 @@ def downstream_metrics(pred_label, true_label, task='emotion'):
     true_label: human annotations
     task: the name of the downstream task
     """
-    assert task in ['emotion','sentiment','verfication']
+    assert task in ['emotion','sentiment','verification']
     pred_label, true_label = np.array(pred_label), np.array(true_label)
     
     if task == 'emotion':
@@ -51,13 +51,66 @@ def downstream_metrics(pred_label, true_label, task='emotion'):
         f1_2class = f1_score(true_2class, pred_2class, average='weighted')
         key_metric, report_metric = -1.0 * mae, {'mae':mae,'corr':corr,'acc_2class':acc_2class,'f1_2class':f1_2class}
 
-    elif task == 'speaker_verification':
-        eer = get_eer(pred_label, true_label, debug=False)
-        key_metric, report_metric = eer, {'EER': eer}
-
     else:
-        acc = np.mean(pred_label == true_label)
-        key_metric, report_metric = acc, {'acc':acc}
+        # Here we calculate it for the speaker verification
+        assert len(true_label) == len(pred_label)
+        vp_dict = {}
+        for vp_name, vp_embed in zip(true_label, pred_label):
+            vp_dict[vp_name] = vp_dict.get(vp_name,[]) + [vp_embed,]
+        # for each speaker we hope to seperate several samples into the enroll part
+        # the remaining as verification part, we repeat 10*speaker_num times to eliminate the randomness
+        N = 4
+        M = 20
+        eer = []
+        for _ in range(10*len(vp_dict)):
+            # for each time, we will sample fixed number of person and utterance for the test
+            vp_names = random.sample(vp_dict.keys(), N)
+            all_embeds = []
+
+            for vp_name in vp_names:
+                vp_embeds = np.array(vp_dict[vp_name])
+                # This line should be fetch without replacement
+                # utt_index = np.random.randint(0, vp_embeds.shape[0], M)
+                utt_index = random.sample(range(vp_embeds.shape[0]),M)
+                utt_embeds = vp_embeds[utt_index] # [M, dim]
+
+                all_embeds.append(utt_embeds)
+
+            all_embeds = torch.from_numpy(np.stack(all_embeds, axis=0))
+
+            enroll_embeds, verify_embeds = torch.split(all_embeds, int(M / 2), dim=1) # [N, M/2, dim]
+            enroll_centroids = enroll_embeds.mean(dim=1) # [N, dim]
+            enroll_standard = torch.sum(torch.sqrt(enroll_centroids**2), dim=1) # [N,]
+            
+            # Here we calculate the simularity for each centroid and the sample
+            verify_embeds = verify_embeds.reshape(-1,verify_embeds.size(2)) # [N*M/2,dim]
+            verify_standard = torch.sum(torch.sqrt(verify_embeds**2), dim=1) # [N*M/2,]
+
+            matmul_standard = torch.matmul(verify_standard[:,None],enroll_standard[None,:])
+            eps = 1e-8
+            matmul_standard = torch.where(matmul_standard>eps, matmul_standard, eps*torch.ones_like(matmul_standard))
+            
+            verify_scores = torch.matmul(verify_embeds,enroll_centroids.permute(1,0)) / matmul_standard
+            verify_scores = verify_scores.view(N,-1,N)
+            
+            # calculate the EER
+            verify_scores = verify_scores + 1e-6 # we add the number to make it compatible with the later threshold process
+            mark_diff, EER = 1, 0
+            for thres in [0.01 * i for i in range(101)]:
+                verify_results = verify_scores > thres
+                FAR = (sum([verify_results[i].float().sum() - verify_results[i, :, i].float().sum() for i in
+                            range(int(N))])
+                       / (N - 1.0) / (float(M / 2)) / N)
+                FRR = (sum([M / 2 - verify_results[i, :, i].float().sum() for i in range(int(N))])
+                       / (float(M / 2)) / N)
+                # Save threshold when FAR = FRR (=EER)
+                if abs(FAR-FRR) < mark_diff:
+                    mark_diff = abs(FAR-FRR) 
+                    EER = (FAR+FRR) / 2
+            
+            eer.append(EER)
+        eer = np.mean(eer)
+        key_metric, report_metric = eer, {'eer':eer}
 
     return key_metric, report_metric
 
@@ -76,6 +129,10 @@ class DownstreamDataset(object):
         audio_name = re.sub('\.npy','.wav',os.path.basename(audio_path))
         audio_input = torch.FloatTensor(np.load(audio_path))
         if self.audio_length is not None: audio_input=audio_input[:self.audio_length,:]
+        # Here sometimes the asr input could be the sepearte file path
+        if os.path.isfile(asr_text):
+            # The following preprocess could be modified based on the formats of the text record
+            asr_text = ' '.join([x.strip('\n').split(',')[2] for x in open(asr_text,'r').readlines()])
         text_words = [x.lower() for x in re.split(' +',re.sub('[\.,\?\!]',' ', asr_text))]
         text_input = self.tokenizer(' '.join(text_words))
         return {'audio_input':audio_input,'text_input':text_input,'label':label,'audio_name':audio_name}
@@ -167,7 +224,7 @@ def run(args, config, train_data, valid_data, test_data=None):
             label_inputs = label_inputs.cuda()
             
             model.zero_grad()
-            logits, loss = model(
+            _, logits, loss = model(
                 s_inputs=s_inputs,
                 s_attention_mask=s_attention_mask,
                 a_inputs=a_inputs,
@@ -195,31 +252,21 @@ def run(args, config, train_data, valid_data, test_data=None):
 
             true_y.extend(list(label_inputs.numpy()))
 
-            if args.task_name == "speaker_verification":
-                logits = model.get_speaker_embeddings(
-                    s_inputs=s_inputs,
-                    s_attention_mask=s_attention_mask,
-                    a_inputs=a_inputs,
-                    a_attention_mask=a_attention_mask
-                )
-            else:
-                logits, _ = model(
-                    s_inputs=s_inputs,
-                    s_attention_mask=s_attention_mask,
-                    a_inputs=a_inputs,
-                    a_attention_mask=a_attention_mask,
-                    labels=None
-                )
-
-            # prediction = torch.argmax(logits, axis=1)
-            # label_outputs = prediction.cpu().detach().numpy().astype(float)
+            hiddens, logits, _ = model(
+                s_inputs=s_inputs,
+                s_attention_mask=s_attention_mask,
+                a_inputs=a_inputs,
+                a_attention_mask=a_attention_mask,
+                labels=None
+            )
 
             if model.label_num == 1:
                 prediction = logits.view(-1)
                 label_outputs = prediction.cpu().detach().numpy().astype(float)
             else:
-                if args.task_name == "speaker_verification":
-                    label_outputs = prediction.cpu().detach().numpy().astype(int)
+                if args.task_name == "verification":
+                    # for speaker verification we take the hidden before the classifier as the output
+                    label_outputs = hiddens.cpu().detach().numpy().astype(float)
                 else:
                     prediction = torch.argmax(logits, axis=1)
                     label_outputs = prediction.cpu().detach().numpy().astype(int)
@@ -240,7 +287,7 @@ def run(args, config, train_data, valid_data, test_data=None):
 
         if key_metric > best_metric:
             best_metric, best_epoch = key_metric, epoch
-            print('Better MAE found on dev, calculate performance on Test')
+            print('Better Metric found on dev, calculate performance on Test')
             pred_y, true_y = [], []
             for acoustic_inputs, semantic_inputs, label_inputs, _ in test_loader:
                 a_inputs = acoustic_inputs[0].cuda()
@@ -249,29 +296,21 @@ def run(args, config, train_data, valid_data, test_data=None):
                 s_attention_mask = semantic_inputs[1].cuda()
 
                 true_y.extend(list(label_inputs.numpy()))
-
-                if args.task_name == "speaker_verification":
-                    logits = model.get_speaker_embeddings(
-                        s_inputs=s_inputs,
-                        s_attention_mask=s_attention_mask,
-                        a_inputs=a_inputs,
-                        a_attention_mask=a_attention_mask
-                    )
-                else:
-                    logits, _, = model(
-                        s_inputs=s_inputs,
-                        s_attention_mask=s_attention_mask,
-                        a_inputs=a_inputs,
-                        a_attention_mask=a_attention_mask,
-                        labels=None
-                    )
+                
+                hiddens, logits, _, = model(
+                    s_inputs=s_inputs,
+                    s_attention_mask=s_attention_mask,
+                    a_inputs=a_inputs,
+                    a_attention_mask=a_attention_mask,
+                    labels=None
+                )
                 
                 if model.label_num == 1:
                     prediction = logits.view(-1)
                     label_outputs = prediction.cpu().detach().numpy().astype(float)
                 else:
-                    if args.task_name == "speaker_verification":
-                        label_outputs = prediction.cpu().detach().numpy().astype(int)
+                    if args.task_name == "verification":
+                        label_outputs = hiddens.cpu().detach().numpy().astype(float)
                     else:
                         prediction = torch.argmax(logits, axis=1)
                         label_outputs = prediction.cpu().detach().numpy().astype(int)
@@ -338,8 +377,21 @@ if __name__ == '__main__':
         report_result = [report_metric]
 
     else:
-        # This line need to be finished
-        report_result = []
+        data_root = '/dataset/libri_mel160/V2_0/libri_mel160'
+
+        train_data = pickle.load(open('/dataset/libri_mel160/V2_0/libri_mel160/verify_train.pkl','rb'))
+        train_data = [(os.path.join(data_root,x[0]),os.path.join(data_root,x[1]),x[2]) for x in train_data]
+        
+        train_data = train_data[:1024]
+
+        valid_data = pickle.load(open('/dataset/libri_mel160/V2_0/libri_mel160/verify_dev.pkl','rb'))
+        valid_data = [(os.path.join(data_root,x[0]),os.path.join(data_root,x[1]),x[2]) for x in valid_data]
+
+        test_data = pickle.load(open('/dataset/libri_mel160/V2_0/libri_mel160/verify_test.pkl','rb'))
+        test_data = [(os.path.join(data_root,x[0]),os.path.join(data_root,x[1]),x[2]) for x in test_data]
+
+        report_metric = run(args, config, train_data, valid_data, test_data)
+        report_result = [report_metric]
 
     # Here we will save the final reports
     os.makedirs(args.save_path, exist_ok=True)

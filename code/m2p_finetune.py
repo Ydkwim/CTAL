@@ -137,7 +137,7 @@ class DownstreamDataset(object):
         return {'audio_input':audio_input,'text_input':text_input,'label':label,'audio_name':audio_name}
 
 
-def collate(sample_list, tokenizer, config):
+def collate(sample_list, tokenizer, config, task_name):
     batch_audio = [x['audio_input'] for x in sample_list]
     pad_batch_audio = pad_sequence(batch_audio, batch_first=True)
     
@@ -151,7 +151,11 @@ def collate(sample_list, tokenizer, config):
     
     a_attention_mask, a_inputs = process_test_MAM_data((pad_batch_audio,),config)
     
-    batch_label = torch.tensor([x['label'] for x in sample_list], dtype=torch.long)
+    if task_name == "sentiment":
+        batch_label = torch.tensor([x['label'] for x in sample_list], dtype=torch.float)
+    else:
+        batch_label = torch.tensor([x['label'] for x in sample_list], dtype=torch.long)
+
     batch_name = [x['audio_name'] for x in sample_list]
     return ((a_inputs, a_attention_mask), 
             (s_inputs, s_attention_mask),
@@ -174,13 +178,13 @@ def run(args, config, train_data, valid_data, test_data=None):
     train_dataset = DownstreamDataset(train_data, tokenizer, audio_length)
     train_loader = torch.utils.data.DataLoader(
         dataset = train_dataset, batch_size = batch_size, 
-        collate_fn=lambda x: collate(x,tokenizer,config['upstream']['acoustic']),
+        collate_fn=lambda x: collate(x,tokenizer,config['upstream']['acoustic'],args.task_name),
         shuffle = True, num_workers = num_workers
     )
     valid_dataset = DownstreamDataset(valid_data, tokenizer, audio_length)
     valid_loader = torch.utils.data.DataLoader(
         dataset = valid_dataset, batch_size = batch_size, 
-        collate_fn=lambda x: collate(x,tokenizer,config['upstream']['acoustic']),
+        collate_fn=lambda x: collate(x,tokenizer,config['upstream']['acoustic'],args.task_name),
         shuffle = False, num_workers = num_workers
     )
     
@@ -189,7 +193,7 @@ def run(args, config, train_data, valid_data, test_data=None):
     test_dataset = DownstreamDataset(test_data, tokenizer, audio_length)
     test_loader = torch.utils.data.DataLoader(
         dataset = test_dataset, batch_size = batch_size, 
-        collate_fn=lambda x: collate(x,tokenizer,config['upstream']['acoustic']),
+        collate_fn=lambda x: collate(x,tokenizer,config['upstream']['acoustic'],args.task_name),
         shuffle = False, num_workers = num_workers
     )
     ########################### CREATE MODEL #################################

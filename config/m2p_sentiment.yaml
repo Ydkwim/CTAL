@@ -1,11 +1,11 @@
 upstream:
-  ckpt_path: '/home/work/Projects/MMPretrain/code/result/result_transformer/m2pretrain_tiny/states-1000000.ckpt'
+  ckpt_path: '/home/work/work/lh_pretrained/result/result_transformer/mmpretrain_6_layers/states-500000.ckpt'
   freeze: False
   acoustic:
     downsample_rate: 1                                    # stacked consecutive features vectors to reduce the length of input sequences by this factor.
     hidden_size: 768                                      # Size of the encoder layers and the pooler layer.
   semantic:
-    tokenizer_path: '/home/work/Projects/MMPretrain/tokenizer/libri-roberta_train-960'
+    tokenizer_path: '/home/work/work/lh_pretrained/libri-roberta_train-960'
 
 downstream:
   label_num: 1

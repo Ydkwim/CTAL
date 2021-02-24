@@ -227,15 +227,10 @@ class RobertaM2Downstream(RobertaM2Upstream):
                 loss = self.loss_fct(logits, labels)
 
             if self.orthogonal_fusion:
-                # This line could be different with the paper?
-                acoustic_state = acoustic_pool + acoustic_max
-                semantic_state = semantic_pool + semantic_max
-                
-                acoustic_norm = torch.norm(acoustic_state,p=2,dim=1)
-                semantic_norm = torch.norm(acoustic_state,p=2,dim=1)
 
-                orth_loss = torch.diag(torch.matmul(acoustic_state, semantic_state.permute(1,0)))
-                orth_loss = torch.mean(torch.abs(orth_loss / (acoustic_norm * semantic_norm)))
+                orth_loss_attn = self.orthogonal_loss(acoustic_pool, semantic_pool)
+                orth_loss_max = self.orthogonal_loss(acoustic_max, semantic_max)
+                orth_loss = orth_loss_attn + orth_loss_max
 
                 loss += orth_loss
 
@@ -243,4 +238,16 @@ class RobertaM2Downstream(RobertaM2Upstream):
             loss = None
 
         return fuse_encode_act, logits, loss
+
+    def orthogonal_loss(self, acoustic_state, semantic_state):
+
+        acoustic_norm = torch.norm(acoustic_state, p=2, dim=1)
+        semantic_norm = torch.norm(acoustic_state, p=2, dim=1)
+
+        orth_loss = torch.diag(torch.matmul(acoustic_state, semantic_state.permute(1, 0)))
+        orth_loss = torch.mean(torch.abs(orth_loss / (acoustic_norm * semantic_norm)))
+
+        return orth_loss
+
+
 

@@ -23,6 +23,8 @@ from transformers import AdamW
 from m2p_mask import process_test_MAM_data
 from m2p_transfer import RobertaM2Downstream
 
+from calculate_eer import get_eer
+
 # Here we need to recalculate the metrics for different tasks
 
 def downstream_metrics(pred_label, true_label, task='emotion'):
@@ -52,63 +54,7 @@ def downstream_metrics(pred_label, true_label, task='emotion'):
         key_metric, report_metric = -1.0 * mae, {'mae':mae,'corr':corr,'acc_2class':acc_2class,'f1_2class':f1_2class}
 
     else:
-        # Here we calculate it for the speaker verification
-        assert len(true_label) == len(pred_label)
-        vp_dict = {}
-        for vp_name, vp_embed in zip(true_label, pred_label):
-            vp_dict[vp_name] = vp_dict.get(vp_name,[]) + [vp_embed,]
-        # for each speaker we hope to seperate several samples into the enroll part
-        # the remaining as verification part, we repeat 10*speaker_num times to eliminate the randomness
-        N = 4
-        M = 20
-        eer = []
-        for _ in range(10*len(vp_dict)):
-            # for each time, we will sample fixed number of person and utterance for the test
-            vp_names = random.sample(vp_dict.keys(), N)
-            all_embeds = []
-
-            for vp_name in vp_names:
-                vp_embeds = np.array(vp_dict[vp_name])
-                # This line should be fetch without replacement
-                # utt_index = np.random.randint(0, vp_embeds.shape[0], M)
-                utt_index = random.sample(range(vp_embeds.shape[0]),M)
-                utt_embeds = vp_embeds[utt_index] # [M, dim]
-
-                all_embeds.append(utt_embeds)
-
-            all_embeds = np.stack(all_embeds, axis=0)
-
-            enroll_embeds, verify_embeds = all_embeds[:,:int(M/2),:], all_embeds[:,int(M/2):,:]
-            enroll_centroids = enroll_embeds.mean(axis=1) # [N, dim]
-            enroll_standard = np.sum(np.sqrt(enroll_centroids**2), axis=1) # [N,]
-            
-            # Here we calculate the simularity for each centroid and the sample
-            verify_embeds = verify_embeds.reshape(-1,verify_embeds.shape[2]) # [N*M/2,dim]
-            verify_standard = np.sum(np.sqrt(verify_embeds**2), axis=1) # [N*M/2,]
-
-            matmul_standard = np.matmul(verify_standard[:,None],enroll_standard[None,:])
-            matmul_standard = np.where(matmul_standard>1e-8, matmul_standard, 1e-8)
-            
-            verify_scores = np.matmul(verify_embeds,enroll_centroids.T) / matmul_standard
-            verify_scores = verify_scores.reshape(N,-1,N)
-            
-            # calculate the EER
-            verify_scores = verify_scores + 1e-6 # we add the eps number to make it compatible with the later threshold process
-            mark_diff, EER = np.inf, 0
-            for thres in [0.01 * i for i in range(101)]:
-                verify_results = verify_scores > thres
-                FAR = (sum([verify_results[i].sum() - verify_results[i,:,i].sum() for i in
-                            range(int(N))])
-                       / (N - 1.0) / (float(M / 2)) / N)
-                FRR = (sum([M / 2 - verify_results[i,:,i].sum() for i in range(int(N))])
-                       / (float(M / 2)) / N)
-                # Save threshold when FAR = FRR (=EER)
-                if abs(FAR-FRR) < mark_diff:
-                    mark_diff = abs(FAR-FRR) 
-                    EER = (FAR+FRR) / 2
-            
-            eer.append(EER)
-        eer = np.mean(eer)
+        eer = get_eer(pred_label, true_label)
         key_metric, report_metric = -1.0 * eer, {'eer':eer}
 
     return key_metric, report_metric
@@ -137,7 +83,7 @@ class DownstreamDataset(object):
         return {'audio_input':audio_input,'text_input':text_input,'label':label,'audio_name':audio_name}
 
 
-def collate(sample_list, tokenizer, config, task_name):
+def collate(sample_list, tokenizer, config):
     batch_audio = [x['audio_input'] for x in sample_list]
     pad_batch_audio = pad_sequence(batch_audio, batch_first=True)
     
@@ -150,13 +96,10 @@ def collate(sample_list, tokenizer, config, task_name):
     s_attention_mask = pad_batch_text['attention_mask']
     
     a_attention_mask, a_inputs = process_test_MAM_data((pad_batch_audio,),config)
-    
-    if task_name == "sentiment":
-        batch_label = torch.tensor([x['label'] for x in sample_list], dtype=torch.float)
-    else:
-        batch_label = torch.tensor([x['label'] for x in sample_list], dtype=torch.long)
 
+    batch_label = torch.tensor([x['label'] for x in sample_list])
     batch_name = [x['audio_name'] for x in sample_list]
+
     return ((a_inputs, a_attention_mask), 
             (s_inputs, s_attention_mask),
             batch_label, batch_name)
@@ -178,13 +121,13 @@ def run(args, config, train_data, valid_data, test_data=None):
     train_dataset = DownstreamDataset(train_data, tokenizer, audio_length)
     train_loader = torch.utils.data.DataLoader(
         dataset = train_dataset, batch_size = batch_size, 
-        collate_fn=lambda x: collate(x,tokenizer,config['upstream']['acoustic'],args.task_name),
+        collate_fn=lambda x: collate(x,tokenizer,config['upstream']['acoustic']),
         shuffle = True, num_workers = num_workers
     )
     valid_dataset = DownstreamDataset(valid_data, tokenizer, audio_length)
     valid_loader = torch.utils.data.DataLoader(
         dataset = valid_dataset, batch_size = batch_size, 
-        collate_fn=lambda x: collate(x,tokenizer,config['upstream']['acoustic'],args.task_name),
+        collate_fn=lambda x: collate(x,tokenizer,config['upstream']['acoustic']),
         shuffle = False, num_workers = num_workers
     )
     
@@ -193,7 +136,7 @@ def run(args, config, train_data, valid_data, test_data=None):
     test_dataset = DownstreamDataset(test_data, tokenizer, audio_length)
     test_loader = torch.utils.data.DataLoader(
         dataset = test_dataset, batch_size = batch_size, 
-        collate_fn=lambda x: collate(x,tokenizer,config['upstream']['acoustic'],args.task_name),
+        collate_fn=lambda x: collate(x,tokenizer,config['upstream']['acoustic']),
         shuffle = False, num_workers = num_workers
     )
     ########################### CREATE MODEL #################################
@@ -208,6 +151,7 @@ def run(args, config, train_data, valid_data, test_data=None):
         {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
     ]
     optimizer = AdamW(optimizer_grouped_parameters, lr=1e-5)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     ########################### TRAINING #####################################
     count, best_metric, save_metric, best_epoch = 0, -np.inf, None, 0
@@ -217,6 +161,7 @@ def run(args, config, train_data, valid_data, test_data=None):
         model.train()
         start_time = time.time()
 
+        time.sleep(2) # avoid the deadlock during the switch between the different dataloaders
         progress = tqdm(train_loader, desc='Epoch {:0>3d}'.format(epoch))
         for acoustic_inputs, semantic_inputs, label_inputs, _ in progress:
             a_inputs = acoustic_inputs[0].cuda()
@@ -239,6 +184,7 @@ def run(args, config, train_data, valid_data, test_data=None):
 
             loss.backward()
             optimizer.step()
+            scheduler.step()
 
             count += 1
             
@@ -248,6 +194,7 @@ def run(args, config, train_data, valid_data, test_data=None):
         model.eval()
         pred_y, true_y = [], []
         with torch.no_grad():
+            time.sleep(2) # avoid the deadlock during the switch between the different dataloaders
             for acoustic_inputs, semantic_inputs, label_inputs, _ in valid_loader:
                 a_inputs = acoustic_inputs[0].cuda()
                 a_attention_mask = acoustic_inputs[1].cuda()
@@ -294,6 +241,7 @@ def run(args, config, train_data, valid_data, test_data=None):
             print('Better Metric found on dev, calculate performance on Test')
             pred_y, true_y = [], []
             with torch.no_grad():
+                time.sleep(2) # avoid the deadlock during the switch between the different dataloaders
                 for acoustic_inputs, semantic_inputs, label_inputs, _ in test_loader:
                     a_inputs = acoustic_inputs[0].cuda()
                     a_attention_mask = acoustic_inputs[1].cuda()

@@ -64,11 +64,11 @@ class RobertaM2Upstream(nn.Module):
             if len(error_msgs) > 0:
                 raise RuntimeError('Error(s) in loading state_dict for {}:\n\t{}'.format(
                                     transformer_model.__class__.__name__, '\n\t'.join(error_msgs)))
-            print('[Transformer] - {} Pre-trained weights loaded!'.format(prefix_name))
+            print('[CTAL] - {} Pre-trained weights loaded!'.format(prefix_name))
             return transformer_model
 
         except: 
-            raise RuntimeError('[Transformer] - {} Pre-trained weights NOT loaded!'.format(prefix_name))
+            raise RuntimeError('[CTAL] - {} Pre-trained weights NOT loaded!'.format(prefix_name))
 
     def _forward(self,
                  s_inputs=None,
@@ -117,16 +117,19 @@ class RobertaM2Upstream(nn.Module):
 
 
 class RobertaM2Downstream(RobertaM2Upstream):
-    def __init__(self, ckpt_path, label_num, drop_rate=0.2, freeze=False, orthogonal_fusion=True):
+    def __init__(self, ckpt_path, label_num, drop_rate=0.2, freeze=False, orthogonal_fusion=True, head='both'):
+        assert head in ['both','acoustic','semantic']
         super().__init__(ckpt_path)
+        self.head = head
         self.freeze = freeze
         self.label_num = label_num
-        self.orthogonal_fusion = orthogonal_fusion
+        self.orthogonal_fusion = (orthogonal_fusion and self.head=='both')
         
-        self.acoustic_linear = nn.Linear(self.acoustic_config.hidden_size,self.acoustic_config.hidden_size)
-        self.semantic_linear = nn.Linear(self.semantic_config.hidden_size,self.semantic_config.hidden_size)
-
-        self.acoustic_attention = nn.Linear(self.acoustic_config.hidden_size,1)
+        if self.head in ['both','acoustic']:
+            self.acoustic_linear = nn.Linear(self.acoustic_config.hidden_size,self.acoustic_config.hidden_size)
+            self.acoustic_attention = nn.Linear(self.acoustic_config.hidden_size,1)
+        if self.head in ['both','semantic']:
+            self.semantic_linear = nn.Linear(self.semantic_config.hidden_size,self.semantic_config.hidden_size)
 
         self.fuse_linear = nn.Linear(self.acoustic_config.hidden_size+self.semantic_config.hidden_size, 
                                      self.acoustic_config.hidden_size+self.semantic_config.hidden_size)
@@ -189,31 +192,39 @@ class RobertaM2Downstream(RobertaM2Upstream):
                 output_hidden_states,
                 return_dict)
 
-        semantic_encode = self.semantic_linear(semantic_encode)
-        semantic_encode = torch.tanh(semantic_encode)
+        if self.head in ['both','semantic']:
+            semantic_encode = self.semantic_linear(semantic_encode)
+            semantic_encode = torch.tanh(semantic_encode)
 
-        semantic_pool = semantic_encode[:,0,:]
+            semantic_pool = semantic_encode[:,0,:]
 
-        semantic_encode = semantic_encode * s_attention_mask[:,:,None] - 10000.0 * (1.0 - s_attention_mask[:,:,None])
-        semantic_max = torch.max(semantic_encode[:,1:,:],dim=1)[0]
+            semantic_encode = semantic_encode * s_attention_mask[:,:,None] - 10000.0 * (1.0 - s_attention_mask[:,:,None])
+            semantic_max = torch.max(semantic_encode[:,1:,:],dim=1)[0]
 
-        acoustic_encode = self.acoustic_linear(acoustic_encode)
-        acoustic_encode = torch.tanh(acoustic_encode)
+        if self.head in ['both','acoustic']:
+            acoustic_encode = self.acoustic_linear(acoustic_encode)
+            acoustic_encode = torch.tanh(acoustic_encode)
 
-        acoustic_pool = self.acoustic_attention(acoustic_encode)
-        acoustic_pool = acoustic_pool * a_attention_mask[:,:,None] - 10000.0 * (1.0 - a_attention_mask[:,:,None])
-        acoustic_pool = F.softmax(acoustic_pool, dim=1)
-        acoustic_pool = torch.matmul(acoustic_pool.permute(0,2,1), acoustic_encode).squeeze(1)
+            acoustic_pool = self.acoustic_attention(acoustic_encode)
+            acoustic_pool = acoustic_pool * a_attention_mask[:,:,None] - 10000.0 * (1.0 - a_attention_mask[:,:,None])
+            acoustic_pool = F.softmax(acoustic_pool, dim=1)
+            acoustic_pool = torch.matmul(acoustic_pool.permute(0,2,1), acoustic_encode).squeeze(1)
 
-        acoustic_encode = acoustic_encode * a_attention_mask[:,:,None] - 10000.0 * (1.0 - a_attention_mask[:,:,None])
-        acoustic_max = torch.max(acoustic_encode, dim=1)[0]
+            acoustic_encode = acoustic_encode * a_attention_mask[:,:,None] - 10000.0 * (1.0 - a_attention_mask[:,:,None])
+            acoustic_max = torch.max(acoustic_encode, dim=1)[0]
 
-        if self.orthogonal_fusion:
-            att_feats = semantic_pool + acoustic_pool
-            max_feats = semantic_max + acoustic_max
-            fuse_encode = torch.cat([att_feats, max_feats], dim=-1)
+        if self.head == 'both':
+            if self.orthogonal_fusion:
+                att_feats = semantic_pool + acoustic_pool
+                max_feats = semantic_max + acoustic_max
+                fuse_encode = torch.cat([att_feats, max_feats], dim=-1)
+            else:
+                fuse_encode = torch.cat([semantic_pool, acoustic_pool],dim=-1)
+
+        elif self.head == 'semantic':
+            fuse_encode = torch.cat([semantic_pool,semantic_max], dim=-1)
         else:
-            fuse_encode = torch.cat([semantic_pool, acoustic_pool],dim=-1)
+            fuse_encode = torch.cat([acoustic_pool,acoustic_max], dim=-1)
 
         fuse_encode = self.fuse_linear(fuse_encode)
         fuse_encode_act = torch.tanh(fuse_encode)
@@ -222,9 +233,9 @@ class RobertaM2Downstream(RobertaM2Upstream):
         
         if labels is not None:
             if self.label_num == 1:
-                loss = self.loss_fct(logits.view(-1), labels.view(-1))
+                loss = self.loss_fct(logits.view(-1), labels.view(-1).float())
             else:
-                loss = self.loss_fct(logits, labels)
+                loss = self.loss_fct(logits, labels.long())
 
             if self.orthogonal_fusion:
 

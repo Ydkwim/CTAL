@@ -33,7 +33,7 @@ The pre-trained model will be saved to the path: _result/transformer/model_name_
 
 - CTAL-Base: https://drive.google.com/file/d/1erCQplU9it9XBNrWDyLutekKthsZIi0q/view?usp=sharing
 
-- CTAL-Large:
+- CTAL-Large: https://drive.google.com/file/d/1L_QIZVRybJiiG2NywcX5xQQw8Y-3Vq5I/view?usp=sharing
 
 ----
 ## Downstream Finetune

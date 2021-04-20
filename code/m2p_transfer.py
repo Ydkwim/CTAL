@@ -253,7 +253,7 @@ class RobertaM2Downstream(RobertaM2Upstream):
     def orthogonal_loss(self, acoustic_state, semantic_state):
 
         acoustic_norm = torch.norm(acoustic_state, p=2, dim=1)
-        semantic_norm = torch.norm(acoustic_state, p=2, dim=1)
+        semantic_norm = torch.norm(semantic_state, p=2, dim=1)
 
         orth_loss = torch.diag(torch.matmul(acoustic_state, semantic_state.permute(1, 0)))
         orth_loss = torch.mean(torch.abs(orth_loss / (acoustic_norm * semantic_norm)))

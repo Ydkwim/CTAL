@@ -92,6 +92,23 @@ class AcousticModel(RobertaPreTrainedModel):
         for layer, heads in heads_to_prune.items():
             self.encoder.layer[layer].attention.prune_heads(heads)
 
+    def get_extended_attention_mask(self, attention_mask, input_shape, device):
+        # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
+        # ourselves in which case we just need to make it broadcastable to all heads.
+        if attention_mask.dim() == 3:
+            extended_attention_mask = attention_mask[:, None, :, :]
+        elif attention_mask.dim() == 2:
+            extended_attention_mask = attention_mask[:, None, None, :]
+        else:
+            raise ValueError(
+                "Wrong shape for input_ids (shape {}) or attention_mask (shape {})".format(
+                    input_shape, attention_mask.shape
+                )
+            )
+        extended_attention_mask = extended_attention_mask.to(dtype=self.dtype)  # fp16 compatibility
+        extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
+        return extended_attention_mask
+
     def forward(
         self,
         inputs_embeds=None,
@@ -241,11 +258,15 @@ class RobertaForMaskedAM(RobertaPreTrainedModel):
     
 
 class RobertaM2Model(nn.Module):
-    def __init__(self, semantic_config, acoustic_config):
+    def __init__(self, semantic_config, acoustic_config, semantic_pretrain=None):
         super().__init__()
         self.semantic_config = semantic_config
         self.acoustic_config = acoustic_config
-        self.semantic_model = RobertaForMaskedLM(semantic_config)
+        if semantic_pretrain is not None:
+            self.semantic_model = RobertaForMaskedLM.from_pretrained(
+                semantic_pretrain,config=self.semantic_config)
+        else:
+            self.semantic_model = RobertaForMaskedLM(semantic_config)
         self.acoustic_model = RobertaForMaskedAM(acoustic_config)
 
     def forward(self, 

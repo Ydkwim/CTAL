@@ -45,18 +45,18 @@ optimizer:
 
 
 dataloader:
-  n_jobs: 8                                             # Subprocess used for torch Dataloader
+  n_jobs: 6                                             # Subprocess used for torch Dataloader
   batch_size: 6                                         # training batch size
   max_timestep: 3000                                    # Max length for audio feature (0 for no restriction)
   
   # LIBRISEECH SETTINGS
-  data_path: '/mnt/data/libri_mel160/'                  # Source data path, run: `python preprocess/preprocess_libri.py --feature_type=fbank --delta=True`
+  data_path: '/dataset/libri_mel160/V1_0/libri_mel160/'                  # Source data path, run: `python preprocess/preprocess_libri.py --feature_type=fbank --delta=True`
   target_path: ''                                       # Target data path for reconstruction to a different feature type, for example linear spectrograms
   phone_path: ''                                        # phone boundary label data path for the phone classification task. set to 'data/libri_phone' or 'data/cpc_phone'
   train_set: ['train-clean-100_alignment',
               'train-clean-360_alignment',
               'train-other-500_alignment']              # can be the subset of ['train-clean-100', 'train-clean-360', 'train-other-500']
-  tokenizer_path: '/mnt/data/libri_language/libri-roberta_train-960'
+  tokenizer_path: '/home/work/Projects/MMPretrain/tokenizer/libri-roberta_train-960'
 
 
 runner:

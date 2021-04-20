@@ -41,18 +41,20 @@ class Runner():
         self.max_keep = config['runner']['max_keep']
 
         # Model configs
-        self.semantic_config = RobertaConfig(**config['semantic'])
+        if 'pretrain_path' in config['semantic']:
+            self.semantic_pretrain = config['semantic']['pretrain_path']
+            self.semantic_config = RobertaConfig.from_pretrained(self.semantic_pretrain)
+        else:
+            self.semantic_pretrain = None
+            self.semantic_config = RobertaConfig(**config['semantic'])
         self.acoustic_config = RobertaConfig(**config['acoustic'])
 
     def set_model(self):
         print('[Runner] - Initializing Transformer model...')
-        self.model = RobertaM2Model(self.semantic_config, self.acoustic_config)
+        self.model = RobertaM2Model(self.semantic_config, self.acoustic_config, self.semantic_pretrain)
         self.model.cuda()
         self.model.train()
 
-        if self.args.multi_gpu:
-            self.model = torch.nn.DataParallel(self.model)
-            print('[Runner] - Multi-GPU training Enabled: ' + str(torch.cuda.device_count()))
         print('[Runner] - Number of parameters: ' + str(sum(p.numel() for p in self.model.parameters() if p.requires_grad)))
 
         param_optimizer = list(self.model.named_parameters())
@@ -102,6 +104,10 @@ class Runner():
         
         if self.args.resume is not None:
             self.load_model(self.args.resume)
+        
+        if self.args.multi_gpu:
+            self.model = torch.nn.DataParallel(self.model)
+            print('[Runner] - Multi-GPU training Enabled: ' + str(torch.cuda.device_count()))
 
     def process_acoustic_data(self, acoustic_inputs):
         """Process training data for the masked acoustic model"""
@@ -240,6 +246,7 @@ class Runner():
                         torch.cuda.empty_cache()
                         self.optimizer.zero_grad()
                     else:
+                        print('Unknow Problem Occured!')
                         raise
         pbar.close()
         self.log.close()

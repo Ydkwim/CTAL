@@ -1,5 +1,5 @@
 upstream:
-  ckpt_path: '/home/work/Projects/MMPretrain/code/result/result_transformer/m2pretrain_tiny/states-1000000.ckpt'
+  ckpt_path: '/home/work/Projects/MMPretrain/code/result/result_transformer/m2pretrain_tiny_correct/states-250000.ckpt'
   freeze: False
   acoustic:
     downsample_rate: 1                                    # stacked consecutive features vectors to reduce the length of input sequences by this factor.
